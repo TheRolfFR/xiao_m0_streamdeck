@@ -6,9 +6,11 @@ edition = "2021"
 [dependencies]
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
+log = "0.4.27"
 panic-halt = "0.2"
 usb-device = "0.3.2"
 usbd-hid = "0.8.2"
+usbd-serial = "0.2.2"
 xiao_m0 = { version = "0.13.0", features = [ "usb" ] }
 
 [profile.dev]
