@@ -1,44 +1,51 @@
 #![no_std]
 #![no_main]
+#![allow(static_mut_refs)]
+
+use core::fmt::Write;
 
 use cortex_m_rt::entry;
 use cortex_m_rt::exception;
 use panic_halt as _;
 
 use hal::{clock::GenericClockController, delay::Delay};
-use pac::{Peripherals, CorePeripherals, interrupt};
+use pac::{interrupt, CorePeripherals, Peripherals};
 use usb_device::bus::UsbBusAllocator;
 use usbd_hid::hid_class::HIDClass;
+use usbd_serial::SerialPort;
+use xiao_m0 as bsp;
 use xiao_m0::ehal::delay::DelayNs;
 use xiao_m0::ehal::digital::OutputPin;
 use xiao_m0::hal::usb::UsbBus;
 use xiao_m0::pac::NVIC;
 use xiao_m0::Led1;
-use xiao_m0 as bsp;
-use usbd_serial::SerialPort;
 
 use bsp::{hal, pac};
 
 use usb_device::prelude::*;
-use usbd_hid::descriptor::gen_hid_descriptor;
 use usbd_hid::descriptor::generator_prelude::*;
 
-#[gen_hid_descriptor(
-    (collection = APPLICATION, usage_page = GENERIC_DESKTOP, usage = KEYBOARD) = {
-        (usage = 0x01, ) = {
-            #[item_settings data, array, absolute] payload=output // Output (Host to Device)
-        };
-    }
-)]
-pub struct StreamDeckReport {
-    pub payload: [u8; 64],
-}
+// HID Report Descriptor for custom device that can receive 1024 bytes
+const HID_REPORT_DESCRIPTOR: &[u8] = &[
+    0x06, 0x00, 0xFF, // Usage Page (Vendor Defined 0xFF00)
+    0x09, 0x01, // Usage (0x01)
+    0xA1, 0x01, // Collection (Application)
+    0x85, 0x02, //   Report ID (2)
+    0x09, 0x01, //   Usage (0x01)
+    0x15, 0x00, //   Logical Minimum (0)
+    0x25, 0xFF, //   Logical Maximum (255)
+    0x75, 0x08, //   Report Size (8 bits)
+    0x96, 0x00, 0x04, //   Report Count (1024)
+    0x91,
+    0x02, //   Output (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+    0xC0, // End Collection
+];
 
-impl Default for StreamDeckReport {
-    fn default() -> Self {
-        Self {
-            payload: [0u8; 64],
-        }
+struct StreamDeckReport;
+
+impl SerializedDescriptor for StreamDeckReport {
+    fn desc() -> &'static [u8] {
+        HID_REPORT_DESCRIPTOR
     }
 }
 
@@ -63,7 +70,6 @@ struct UsbSerialWriter;
 
 /// Log writer object provides core::fmt::Write over the USB_SERIAL object
 static mut LOG_WRITER: UsbSerialWriter = UsbSerialWriter;
-
 
 impl core::fmt::Write for UsbSerialWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
@@ -112,18 +118,19 @@ fn main() -> ! {
     unsafe {
         USB_HID = Some(HIDClass::new(&bus_allocator, StreamDeckReport::desc(), 100));
         USB_SERIAL = Some(SerialPort::new(&bus_allocator));
-        USB_BUS = Some(UsbDeviceBuilder::new(&bus_allocator, UsbVidPid(0x0fd9, 0x0084))
-        .composite_with_iads()
-        .strings(&[StringDescriptors::default()
-            .manufacturer("Elgato")
-            .product("Stream Deck Plus")
-            .serial_number("0001")
-        ]).unwrap()
-        .max_packet_size_0(64).unwrap()
-        .build())
+        USB_BUS = Some(
+            UsbDeviceBuilder::new(&bus_allocator, UsbVidPid(0x0fd9, 0x0084))
+                .composite_with_iads()
+                .strings(&[StringDescriptors::default()
+                    .manufacturer("Elgato")
+                    .product("Stream Deck Plus")
+                    .serial_number("0001")])
+                .unwrap()
+                .max_packet_size_0(64)
+                .unwrap()
+                .build(),
+        )
     }
-
-
 
     // Enable USB interrupts
     unsafe {
@@ -149,11 +156,12 @@ fn main() -> ! {
     }
 }
 
-fn handle_command(cmd: &[u8]) {
+fn handle_command(cmd: &[u8], size: usize) {
     unsafe {
-        USB_SERIAL.as_mut().map(|usb_serial: &mut SerialPort<UsbBus>| {
-            usb_serial.write("Found something !\r\n".as_bytes()).ok();
-        });
+        write!(LOG_WRITER, "Buffer ({})={:?}\r\n", size, cmd).ok();
+        if cmd[0] == 0x2 {
+            write!(LOG_WRITER, "Found reset_key_stream\r\n").ok();
+        }
     }
 }
 
@@ -170,9 +178,9 @@ fn poll_usb() {
             // usb_dev.poll(&mut [serial]);
 
             // Read incoming HID data
-            let mut buff = [0u8; 64];
+            let mut buff = [0u8; 1024];
             if let Ok(n) = hid.pull_raw_output(&mut buff) {
-                handle_command(&buff[..n]);
+                handle_command(&buff[..n], n);
             }
 
             // Read incoming serial data
