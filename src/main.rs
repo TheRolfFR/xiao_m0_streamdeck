@@ -12,6 +12,7 @@ use hal::{clock::GenericClockController, delay::Delay};
 use pac::{interrupt, CorePeripherals, Peripherals};
 use usb_device::bus::UsbBusAllocator;
 use usbd_hid::hid_class::HIDClass;
+use usbd_hid::hid_class::ReportInfo;
 use usbd_serial::SerialPort;
 use xiao_m0 as bsp;
 use xiao_m0::ehal::delay::DelayNs;
@@ -25,20 +26,31 @@ use bsp::{hal, pac};
 use usb_device::prelude::*;
 use usbd_hid::descriptor::generator_prelude::*;
 
-// HID Report Descriptor for custom device that can receive 1024 bytes
+// HID Report Descriptor for custom device that can receive 1024 bytes + feature reports
 const HID_REPORT_DESCRIPTOR: &[u8] = &[
-    0x06, 0x00, 0xFF, // Usage Page (Vendor Defined 0xFF00)
-    0x09, 0x01, // Usage (0x01)
-    0xA1, 0x01, // Collection (Application)
-    0x85, 0x02, //   Report ID (2)
-    0x09, 0x01, //   Usage (0x01)
-    0x15, 0x00, //   Logical Minimum (0)
-    0x25, 0xFF, //   Logical Maximum (255)
-    0x75, 0x08, //   Report Size (8 bits)
-    0x96, 0x00, 0x04, //   Report Count (1024)
-    0x91,
-    0x02, //   Output (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-    0xC0, // End Collection
+    0x06, 0x00, 0xFF,    // Usage Page (Vendor Defined 0xFF00)
+    0x09, 0x01,          // Usage (0x01)
+    0xA1, 0x01,          // Collection (Application)
+
+    // Output Report (Host to Device) - 1024 bytes with Report ID 0x02
+    0x85, 0x02,          //   Report ID (2)
+    0x09, 0x01,          //   Usage (0x01)
+    0x15, 0x00,          //   Logical Minimum (0)
+    0x25, 0xFF,          //   Logical Maximum (255)
+    0x75, 0x08,          //   Report Size (8 bits)
+    0x96, 0x00, 0x04,    //   Report Count (1024)
+    0x91, 0x02,          //   Output (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+
+    // Feature Report - Bidirectional with Report ID 0x03
+    0x85, 0x03,          //   Report ID (3)
+    0x09, 0x02,          //   Usage (0x02)
+    0x15, 0x00,          //   Logical Minimum (0)
+    0x25, 0xFF,          //   Logical Maximum (255)
+    0x75, 0x08,          //   Report Size (8 bits)
+    0x95, 0x40,          //   Report Count (64) - 64 byte feature report
+    0xB1, 0x02,          //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+
+    0xC0,                // End Collection
 ];
 
 struct StreamDeckReport;
@@ -158,9 +170,19 @@ fn main() -> ! {
 
 fn handle_command(cmd: &[u8], size: usize) {
     unsafe {
-        write!(LOG_WRITER, "Buffer ({})={:?}\r\n", size, cmd).ok();
-        if cmd[0] == 0x2 {
+        // write!(LOG_WRITER, "Output buffer ({})={:?}\r\n", size, cmd).ok();
+        if size >= 1 && cmd[0] == 0x2 {
             write!(LOG_WRITER, "Found reset_key_stream\r\n").ok();
+        }
+    }
+}
+
+fn handle_report(cmd: &[u8], size: usize, _report_info: ReportInfo) {
+    unsafe {
+        // write!(LOG_WRITER, "Report info: {:?}", report_info).ok();
+        // write!(LOG_WRITER, "Report buffer ({})={:?}\r\n", size, cmd).ok();
+        if size >= 2 && cmd[0] == 0x3 && cmd[1] == 0x2 {
+            write!(LOG_WRITER, "Found reset command\r\n").ok();
         }
     }
 }
@@ -181,6 +203,11 @@ fn poll_usb() {
             let mut buff = [0u8; 1024];
             if let Ok(n) = hid.pull_raw_output(&mut buff) {
                 handle_command(&buff[..n], n);
+            }
+
+            if let Ok(report_info) = hid.pull_raw_report(&mut buff) {
+                let n = report_info.len;
+                handle_report(&buff[..n], n, report_info);
             }
 
             // Read incoming serial data
