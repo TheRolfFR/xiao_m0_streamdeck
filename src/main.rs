@@ -10,6 +10,7 @@ use panic_halt as _;
 
 use hal::{clock::GenericClockController, delay::Delay};
 use pac::{interrupt, CorePeripherals, Peripherals};
+use cortex_m::interrupt::free as disable_interrupt;
 use usb_device::bus::UsbBusAllocator;
 use usbd_hid::hid_class::HIDClass;
 use usbd_hid::hid_class::ReportInfo;
@@ -50,10 +51,28 @@ const HID_REPORT_DESCRIPTOR: &[u8] = &[
     0x95, 0x40,          //   Report Count (64) - 64 byte feature report
     0xB1, 0x02,          //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
 
+    // Read-only Feature Report with Report ID 0x06 (32 bytes)
+    0x85, 0x06,          //   Report ID (6)
+    0x09, 0x03,          //   Usage (0x03)
+    0x15, 0x00,          //   Logical Minimum (0)
+    0x25, 0xFF,          //   Logical Maximum (255)
+    0x75, 0x08,          //   Report Size (8 bits)
+    0x95, 0x20,          //   Report Count (32) - 32 byte feature report
+    0xB1, 0x02,          //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+
     0xC0,                // End Collection
 ];
 
 struct StreamDeckReport;
+
+#[gen_hid_descriptor(
+    (report_id = 0x6, usage=0x3) = {
+        #[item_settings_data,variable,absolute] buf=feature
+    }
+)]
+struct RevisionReport {
+    pub buf: [u8; 32]
+}
 
 impl SerializedDescriptor for StreamDeckReport {
     fn desc() -> &'static [u8] {
@@ -150,6 +169,11 @@ fn main() -> ! {
         NVIC::unmask(interrupt::USB);
     }
 
+    led_pin.set_high().unwrap();
+
+    let mut serial_number = [0u8; 33];
+    serial_number[0] = 0x6;
+    serial_number[6..10].copy_from_slice("0001"[0..4].as_bytes());
     let mut i: u32 = 0;
 
     loop {
@@ -163,6 +187,11 @@ fn main() -> ! {
         // Increment loop counter
         i = i.wrapping_add(1);
 
+        disable_interrupt(|_| unsafe {
+            // write serial number (0001)
+            USB_HID.as_mut().unwrap().push_raw_input(&serial_number).ok();
+        });
+
         // Wait 100ms before next loop
         delay.delay_ms(100u32);
     }
@@ -170,17 +199,17 @@ fn main() -> ! {
 
 fn handle_command(cmd: &[u8], size: usize) {
     unsafe {
-        // write!(LOG_WRITER, "Output buffer ({})={:?}\r\n", size, cmd).ok();
+        write!(LOG_WRITER, "Output buffer ({})={:?}\r\n", size, cmd).ok();
         if size >= 1 && cmd[0] == 0x2 {
             write!(LOG_WRITER, "Found reset_key_stream\r\n").ok();
         }
     }
 }
 
-fn handle_report(cmd: &[u8], size: usize, _report_info: ReportInfo) {
+fn handle_report(cmd: &[u8], size: usize, report_info: ReportInfo) {
     unsafe {
-        // write!(LOG_WRITER, "Report info: {:?}", report_info).ok();
-        // write!(LOG_WRITER, "Report buffer ({})={:?}\r\n", size, cmd).ok();
+        write!(LOG_WRITER, "{report_info:?}").ok();
+        write!(LOG_WRITER, "Report buffer ({})={:?}\r\n", size, cmd).ok();
         if size >= 2 && cmd[0] == 0x3 && cmd[1] == 0x2 {
             write!(LOG_WRITER, "Found reset command\r\n").ok();
         }
