@@ -27,56 +27,38 @@ use bsp::{hal, pac};
 use usb_device::prelude::*;
 use usbd_hid::descriptor::generator_prelude::*;
 
-// HID Report Descriptor for custom device that can receive 1024 bytes + feature reports
-const HID_REPORT_DESCRIPTOR: &[u8] = &[
-    0x06, 0x00, 0xFF,    // Usage Page (Vendor Defined 0xFF00)
-    0x09, 0x01,          // Usage (0x01)
-    0xA1, 0x01,          // Collection (Application)
-
-    // Output Report (Host to Device) - 1024 bytes with Report ID 0x02
-    0x85, 0x02,          //   Report ID (2)
-    0x09, 0x01,          //   Usage (0x01)
-    0x15, 0x00,          //   Logical Minimum (0)
-    0x25, 0xFF,          //   Logical Maximum (255)
-    0x75, 0x08,          //   Report Size (8 bits)
-    0x96, 0x00, 0x04,    //   Report Count (1024)
-    0x91, 0x02,          //   Output (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-
-    // Feature Report - Bidirectional with Report ID 0x03
-    0x85, 0x03,          //   Report ID (3)
-    0x09, 0x02,          //   Usage (0x02)
-    0x15, 0x00,          //   Logical Minimum (0)
-    0x25, 0xFF,          //   Logical Maximum (255)
-    0x75, 0x08,          //   Report Size (8 bits)
-    0x95, 0x40,          //   Report Count (64) - 64 byte feature report
-    0xB1, 0x02,          //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-
-    // Read-only Feature Report with Report ID 0x06 (32 bytes)
-    0x85, 0x06,          //   Report ID (6)
-    0x09, 0x03,          //   Usage (0x03)
-    0x15, 0x00,          //   Logical Minimum (0)
-    0x25, 0xFF,          //   Logical Maximum (255)
-    0x75, 0x08,          //   Report Size (8 bits)
-    0x95, 0x20,          //   Report Count (32) - 32 byte feature report
-    0xB1, 0x02,          //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-
-    0xC0,                // End Collection
-];
-
-struct StreamDeckReport;
 
 #[gen_hid_descriptor(
-    (report_id = 0x6, usage=0x3) = {
-        #[item_settings_data,variable,absolute] buf=feature
+    (collection = APPLICATION, usage = 0x1, usage_page = VENDOR_DEFINED_START) = {
+        (report_id = 0x2, usage=0x2) = { // restart_key_stream
+            #[item_settings data,variable,absolute] key=output
+        };
+        (report_id = 0x3, usage=0x3) = { // reset
+            #[item_settings data,variable,absolute] reset=feature
+        };
+        (report_id = 0x6, usage=0x4) = { // revision
+            #[item_settings data,variable,absolute] revision=feature
+        };
+        (report_id = 0x10, usage=0x5) = { // fake button input
+            #[item_settings data,variable,absolute] button=input
+        }
     }
 )]
-struct RevisionReport {
-    pub buf: [u8; 32]
+struct StreamDeckReport {
+    pub key: [u8; 1024],
+    pub reset: [u8; 64],
+    pub revision: [u8; 32],
+    pub button: u8
 }
 
-impl SerializedDescriptor for StreamDeckReport {
-    fn desc() -> &'static [u8] {
-        HID_REPORT_DESCRIPTOR
+impl Default for StreamDeckReport {
+    fn default() -> Self {
+        Self {
+            key: [0u8; 1024],
+            reset: [0u8; 64],
+            revision: Default::default(),
+            button: Default::default()
+        }
     }
 }
 
@@ -160,20 +142,14 @@ fn main() -> ! {
                 .max_packet_size_0(64)
                 .unwrap()
                 .build(),
-        )
-    }
+        );
 
-    // Enable USB interrupts
-    unsafe {
+        // Enable USB interrupts
         core.NVIC.set_priority(interrupt::USB, 1);
         NVIC::unmask(interrupt::USB);
     }
 
     led_pin.set_high().unwrap();
-
-    let mut serial_number = [0u8; 33];
-    serial_number[0] = 0x6;
-    serial_number[6..10].copy_from_slice("0001"[0..4].as_bytes());
     let mut i: u32 = 0;
 
     loop {
@@ -187,10 +163,7 @@ fn main() -> ! {
         // Increment loop counter
         i = i.wrapping_add(1);
 
-        disable_interrupt(|_| unsafe {
-            // write serial number (0001)
-            USB_HID.as_mut().unwrap().push_raw_input(&serial_number).ok();
-        });
+        send_revision();
 
         // Wait 100ms before next loop
         delay.delay_ms(100u32);
@@ -214,6 +187,21 @@ fn handle_report(cmd: &[u8], size: usize, report_info: ReportInfo) {
             write!(LOG_WRITER, "Found reset command\r\n").ok();
         }
     }
+}
+
+fn send_revision() {
+    let mut serial_number = [0u8; 33];
+    serial_number[0] = 0x6;
+    serial_number[6..11].copy_from_slice("0001\0"[0..5].as_bytes());
+
+    disable_interrupt(|_| unsafe {
+        // write serial number (0001)
+        let send_result = USB_HID.as_mut().unwrap().push_raw_input(&serial_number);
+        match send_result {
+            Ok(size) => write!(LOG_WRITER, "Ok: Pushed rev {}\r\n", size),
+            Err(err) => write!(LOG_WRITER, "Err: {:?}\r\n", err)
+        }.ok();
+    });
 }
 
 fn poll_usb() {

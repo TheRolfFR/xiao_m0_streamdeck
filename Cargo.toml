@@ -12,6 +12,7 @@ usb-device = "0.3.2"
 usbd-hid = "0.8.2"
 usbd-serial = "0.2.2"
 xiao_m0 = { version = "0.13.0", features = [ "usb" ] }
+ssmarshal = { version = "1.0.0", default-features = false }
 
 [profile.dev]
 # Rust debug is too slow.
