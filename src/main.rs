@@ -9,12 +9,13 @@ use cortex_m_rt::exception;
 use panic_halt as _;
 
 use hal::{clock::GenericClockController, delay::Delay};
-use pac::{interrupt, CorePeripherals, Peripherals};
+use pac::{interrupt, CorePeripherals, Peripherals, TC3};
 use cortex_m::interrupt::free as disable_interrupt;
 use usb_device::bus::UsbBusAllocator;
 use usbd_hid::hid_class::HIDClass;
 use usbd_hid::hid_class::ReportInfo;
 use usbd_serial::SerialPort;
+use xiao_m0::hal::{fugit::ExtU32, timer::TimerCounter, prelude::InterruptDrivenTimer};
 use xiao_m0 as bsp;
 use xiao_m0::ehal::delay::DelayNs;
 use xiao_m0::ehal::digital::OutputPin;
@@ -78,6 +79,8 @@ static mut USB_BUS: Option<UsbDevice<UsbBus>> = None;
 static mut USB_HID: Option<HIDClass<UsbBus>> = None;
 static mut USB_SERIAL: Option<SerialPort<UsbBus>> = None;
 
+static mut TIMER: Option<TimerCounter<TC3>> = None;
+
 /// Empty type to implement write over USB serial
 struct UsbSerialWriter;
 
@@ -114,6 +117,15 @@ fn main() -> ! {
 
     let pins = bsp::pins::Pins::new(peripherals.PORT);
     let mut delay = Delay::new(core.SYST, &mut clocks);
+
+    let timer_clock = clocks.gclk0();
+    let tc_clock = clocks.tcc2_tc3(&timer_clock).unwrap();
+    let tc3 = unsafe {
+        TIMER = Some(TimerCounter::tc3_(&tc_clock, peripherals.TC3, &mut peripherals.PM));
+        TIMER.as_mut().unwrap()
+    };
+    tc3.start(500.millis());
+    tc3.enable_interrupt();
 
     let mut led_pin: Led1 = pins.led1.into_mode();
 
@@ -246,4 +258,15 @@ fn poll_usb() {
 #[interrupt]
 fn USB() {
     poll_usb();
+}
+
+#[interrupt]
+fn TC3() {
+    disable_interrupt(|_| unsafe {
+        if let Some(timer) = TIMER.as_mut() {
+            if timer.wait().is_ok() {
+                send_revision();
+            }
+        }
+    })
 }
