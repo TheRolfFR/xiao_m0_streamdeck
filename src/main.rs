@@ -76,7 +76,7 @@ fn SysTick() {
 
 static mut USB_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None;
 static mut USB_BUS: Option<UsbDevice<UsbBus>> = None;
-static mut USB_HID: Option<HIDClass<UsbBus>> = None;
+static mut USB_HID: Option<HIDClass<UsbBus, 64>> = None;
 static mut USB_SERIAL: Option<SerialPort<UsbBus>> = None;
 
 static mut TIMER: Option<TimerCounter<TC3>> = None;
@@ -141,7 +141,9 @@ fn main() -> ! {
     };
 
     unsafe {
-        USB_HID = Some(HIDClass::new(&bus_allocator, StreamDeckReport::desc(), 100));
+        let mut hid_class = HIDClass::new(&bus_allocator, StreamDeckReport::desc(), 100);
+        hid_class.get_report_handler = Some(&handle_get_report);
+        USB_HID = Some(hid_class);
         USB_SERIAL = Some(SerialPort::new(&bus_allocator));
         USB_BUS = Some(
             UsbDeviceBuilder::new(&bus_allocator, UsbVidPid(0x0fd9, 0x0084))
@@ -175,8 +177,6 @@ fn main() -> ! {
         // Increment loop counter
         i = i.wrapping_add(1);
 
-        send_revision();
-
         // Wait 100ms before next loop
         delay.delay_ms(100u32);
     }
@@ -191,6 +191,20 @@ fn handle_command(cmd: &[u8], size: usize) {
     }
 }
 
+fn handle_get_report(report_info: ReportInfo, data: &mut [u8]) -> Option<usize> {
+    unsafe { write!(LOG_WRITER, "{:?}\r\n", report_info).ok(); }
+    match report_info.report_id {
+        6 => {
+            let serial_number = prepare_revision();
+            data[0..6].copy_from_slice(&serial_number[0..6]);
+            Some(32)
+        }
+        _ => {
+            None
+        }
+    }
+}
+
 fn handle_report(cmd: &[u8], size: usize, report_info: ReportInfo) {
     unsafe {
         write!(LOG_WRITER, "{report_info:?}").ok();
@@ -201,10 +215,16 @@ fn handle_report(cmd: &[u8], size: usize, report_info: ReportInfo) {
     }
 }
 
-fn send_revision() {
-    let mut serial_number = [0u8; 33];
+fn prepare_revision() -> [u8; 32] {
+    let mut serial_number = [0u8; 32];
     serial_number[0] = 0x6;
     serial_number[6..11].copy_from_slice("0001\0"[0..5].as_bytes());
+    unsafe { write!(LOG_WRITER, "Sending revision\r\n").ok(); }
+    serial_number
+}
+
+fn send_revision() {
+    let serial_number = prepare_revision();
 
     disable_interrupt(|_| unsafe {
         // write serial number (0001)
@@ -265,7 +285,7 @@ fn TC3() {
     disable_interrupt(|_| unsafe {
         if let Some(timer) = TIMER.as_mut() {
             if timer.wait().is_ok() {
-                send_revision();
+                // send_revision();
             }
         }
     })
