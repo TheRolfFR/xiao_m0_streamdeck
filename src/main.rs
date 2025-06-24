@@ -2,8 +2,9 @@
 #![no_main]
 #![allow(static_mut_refs)]
 
-use core::fmt::Write;
+use core::cell::RefCell;
 
+use cortex_m::interrupt::Mutex;
 use cortex_m_rt::entry;
 use cortex_m_rt::exception;
 use panic_halt as _;
@@ -28,6 +29,16 @@ use bsp::{hal, pac};
 use usb_device::prelude::*;
 use usbd_hid::descriptor::generator_prelude::*;
 
+
+mod serial;
+use serial::*;
+
+mod revision;
+use revision::*;
+
+use crate::report_handler::RequestHandler;
+
+mod report_handler;
 
 #[gen_hid_descriptor(
     (collection = APPLICATION, usage = 0x1, usage_page = VENDOR_DEFINED_START) = {
@@ -77,31 +88,11 @@ fn SysTick() {
 static mut USB_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None;
 static mut USB_BUS: Option<UsbDevice<UsbBus>> = None;
 static mut USB_HID: Option<HIDClass<UsbBus, 64>> = None;
-static mut USB_SERIAL: Option<SerialPort<UsbBus>> = None;
+
+static mut REQ_HANDLER: Mutex<RefCell<StreamDeckHandler>> = Mutex::new(RefCell::new(StreamDeckHandler {}));
 
 static mut TIMER: Option<TimerCounter<TC3>> = None;
 
-/// Empty type to implement write over USB serial
-struct UsbSerialWriter;
-
-/// Log writer object provides core::fmt::Write over the USB_SERIAL object
-static mut LOG_WRITER: UsbSerialWriter = UsbSerialWriter;
-
-impl core::fmt::Write for UsbSerialWriter {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        if s.len() == 0 {
-            return Ok(());
-        }
-
-        cortex_m::interrupt::free(|_| unsafe {
-            let serial = USB_SERIAL.as_mut().unwrap();
-
-            let _r = serial.write(s.as_bytes());
-
-            Ok(())
-        })
-    }
-}
 
 #[entry]
 fn main() -> ! {
@@ -158,6 +149,10 @@ fn main() -> ! {
                 .build(),
         );
 
+        // Process messages
+        enqueue_message!("Rev: {:?}", prepare_revision()).ok();
+        while process_next_message() {}
+
         // Enable USB interrupts
         core.NVIC.set_priority(interrupt::USB, 1);
         NVIC::unmask(interrupt::USB);
@@ -177,63 +172,48 @@ fn main() -> ! {
         // Increment loop counter
         i = i.wrapping_add(1);
 
+        // Process messages
+        while process_next_message() {}
+
         // Wait 100ms before next loop
         delay.delay_ms(100u32);
     }
 }
 
-fn handle_command(cmd: &[u8], size: usize) {
-    unsafe {
-        write!(LOG_WRITER, "Output buffer ({})={:?}\r\n", size, cmd).ok();
-        if size >= 1 && cmd[0] == 0x2 {
-            write!(LOG_WRITER, "Found reset_key_stream\r\n").ok();
+struct StreamDeckHandler;
+
+impl RequestHandler for StreamDeckHandler {
+    fn get_report(&mut self, report_info: ReportInfo, data: &mut [u8]) -> Option<usize> {
+        enqueue_message!("{:?}", report_info).ok();
+        match report_info.report_id {
+            6 => Some(prepare_revision_into(data)),
+            _ => None
+        }
+    }
+    fn set_report(&mut self, report_info: ReportInfo, data: &[u8]) -> Result<(), ()> {
+        enqueue_message!("{report_info:?}").ok();
+
+        let size = report_info.len;
+        enqueue_message!("Report buffer ({})={:?}", size, data).ok();
+
+        if size >= 2 && data[0] == 0x3 && data[1] == 0x2 {
+            enqueue_message!("Found reset command").ok();
+        }
+        Ok(())
+    }
+    fn output(&mut self, report_id: u8, data: &[u8], size: usize) {
+        enqueue_message!("Output buffer [#{}]({})={:?}", report_id, size, data).ok();
+        if report_id == 0x2 {
+            enqueue_message!("Found reset_key_stream").ok();
         }
     }
 }
 
 fn handle_get_report(report_info: ReportInfo, data: &mut [u8]) -> Option<usize> {
-    unsafe { write!(LOG_WRITER, "{:?}\r\n", report_info).ok(); }
-    match report_info.report_id {
-        6 => {
-            let serial_number = prepare_revision();
-            data[0..6].copy_from_slice(&serial_number[0..6]);
-            Some(32)
-        }
-        _ => {
-            None
-        }
-    }
-}
-
-fn handle_report(cmd: &[u8], size: usize, report_info: ReportInfo) {
-    unsafe {
-        write!(LOG_WRITER, "{report_info:?}").ok();
-        write!(LOG_WRITER, "Report buffer ({})={:?}\r\n", size, cmd).ok();
-        if size >= 2 && cmd[0] == 0x3 && cmd[1] == 0x2 {
-            write!(LOG_WRITER, "Found reset command\r\n").ok();
-        }
-    }
-}
-
-fn prepare_revision() -> [u8; 32] {
-    let mut serial_number = [0u8; 32];
-    serial_number[0] = 0x6;
-    serial_number[6..11].copy_from_slice("0001\0"[0..5].as_bytes());
-    unsafe { write!(LOG_WRITER, "Sending revision\r\n").ok(); }
-    serial_number
-}
-
-fn send_revision() {
-    let serial_number = prepare_revision();
-
-    disable_interrupt(|_| unsafe {
-        // write serial number (0001)
-        let send_result = USB_HID.as_mut().unwrap().push_raw_input(&serial_number);
-        match send_result {
-            Ok(size) => write!(LOG_WRITER, "Ok: Pushed rev {}\r\n", size),
-            Err(err) => write!(LOG_WRITER, "Err: {:?}\r\n", err)
-        }.ok();
-    });
+    disable_interrupt(|cs| unsafe {
+        let mut req_handler = REQ_HANDLER.borrow(cs).borrow_mut();
+        req_handler.get_report(report_info, data)
+    })
 }
 
 fn poll_usb() {
@@ -248,15 +228,18 @@ fn poll_usb() {
             // usb_dev.poll(&mut [hid]);
             // usb_dev.poll(&mut [serial]);
 
+            let mut handler = StreamDeckHandler;
+
             // Read incoming HID data
             let mut buff = [0u8; 1024];
             if let Ok(n) = hid.pull_raw_output(&mut buff) {
-                handle_command(&buff[..n], n);
+                let report_id = if n >= 1 { buff[0] } else { 0 };
+                handler.output(report_id, &buff[1..n], n - 1);
             }
 
             if let Ok(report_info) = hid.pull_raw_report(&mut buff) {
                 let n = report_info.len;
-                handle_report(&buff[..n], n, report_info);
+                handler.set_report(report_info, &buff[..n]).ok();
             }
 
             // Read incoming serial data

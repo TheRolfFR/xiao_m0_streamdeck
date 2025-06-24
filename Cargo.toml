@@ -9,10 +9,11 @@ cortex-m-rt = "0.7"
 log = "0.4.27"
 panic-halt = "0.2"
 usb-device = "0.3.2"
-usbd-hid = "0.8.2"
+usbd-hid = { path = "../usbd-hid" }
 usbd-serial = "0.2.2"
 xiao_m0 = { version = "0.13.0", features = [ "usb" ] }
 ssmarshal = { version = "1.0.0", default-features = false }
+heapless = "0.8.0"
 
 [profile.dev]
 # Rust debug is too slow.
