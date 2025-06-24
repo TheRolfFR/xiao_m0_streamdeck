@@ -134,6 +134,7 @@ fn main() -> ! {
     unsafe {
         let mut hid_class = HIDClass::new(&bus_allocator, StreamDeckReport::desc(), 100);
         hid_class.get_report_handler = Some(&handle_get_report);
+        hid_class.logger = Some(&send_log);
         USB_HID = Some(hid_class);
         USB_SERIAL = Some(SerialPort::new(&bus_allocator));
         USB_BUS = Some(
@@ -214,6 +215,10 @@ fn handle_get_report(report_info: ReportInfo, data: &mut [u8]) -> Option<usize> 
         let mut req_handler = REQ_HANDLER.borrow(cs).borrow_mut();
         req_handler.get_report(report_info, data)
     })
+}
+
+fn send_log(args: core::fmt::Arguments) -> Result<(), ()> {
+    enqueue_formatted(args).map_err(|_| ())
 }
 
 fn poll_usb() {
